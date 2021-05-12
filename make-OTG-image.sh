@@ -7,7 +7,11 @@ shopt -s expand_aliases
 # use goto, ref: https://stackoverflow.com/questions/9639103/is-there-a-goto-statement-in-bash#answer-45538151
 alias goto="cat >/dev/null <<"
 
+#goto \#SETUP_INTERFACE
+
 START_DIR=$(pwd)
+
+INSTALL_DIR=$(cd basedir $1; pwd)
 
 cleanup() {
   if [[ $? -ne 0 && $? -ne 130 ]]; then
@@ -27,11 +31,14 @@ EOF
 
 trap cleanup EXIT
 
+MMC=/dev/mmcblk0
+
 #goto "#WRITE_IMAGE"
+#goto "#MOUNT_IMAGE"
+#goto "#SETUP_INTERFACE"
 
 printf "Please insert your SD-Card into card reader.\n"
 
-MMC=/dev/mmcblk0
 printf "waiting for $MMC.\n";
 while [[ ! -e $MMC ]]; do
   sleep 1;
@@ -44,28 +51,27 @@ read
 cd /tmp
 
 # try reuse existing image
-IMG_ZIP_CNT=`ls -1 *raspbian-stretch.zip | wc -l`
-if [[ $IMG_ZIP_CNT -gt 1 ]]; then
-  printf "To many images found in /tmp, remove some or all:\n\n";
-  ls -1 *raspbian-stretch.zip
-elif [[ $IMG_ZIP_CNT -eq 1 ]]; then
+IMG_ZIP_CNT=$( set +e; ls -1 *raspbian*.zip 2>/dev/null | wc -l)
+if [[ $IMG_ZIP_CNT -eq 1 ]]; then
   printf "Reusing existing archive.\n"
 else  
-  curl -JLO https://downloads.raspberrypi.org/raspbian_latest 
+  #curl -L -o raspbian_latest.zip https://downloads.raspberrypi.org/raspbian_latest 
+  #curl -L -o raspbian_latest.zip https://downloads.raspberrypi.org/raspbian/images/raspbian-2019-04-09/2019-04-08-raspbian-stretch.zip
+  #curl --location --remote-name --remote-header-name https://downloads.raspberrypi.org/raspbian/images/raspbian-2017-07-05/2017-07-05-raspbian-jessie.zip
+  curl --location --remote-name --remote-header-name https://downloads.raspberrypi.org/raspbian/images/raspbian-2016-05-31/2016-05-27-raspbian-jessie.zip
 fi
-IMG_ZIP=`ls -1 *raspbian-stretch.zip`
+IMG_ZIP=$(ls -1 *raspbian*.zip)
 printf "Using archive /tmp/$IMG_ZIP\n"
-rm -f *raspbian-stretch.img
+rm -f *raspbian*.img
 unzip $IMG_ZIP
 
 #WRITE_IMAGE
 
 #goto "#MOUNT_IMAGE"
 
-IMG=`ls -1 *raspbian-stretch.img`
+IMG=`ls -1 *raspbian*.img`
 printf "Using image /tmp/$IMG\n"
-sudo dd if=$IMG of=$MMC bs=64M status=progress oflag=sync
-sync
+pv $IMG | sudo dd of=$MMC bs=64M oflag=sync
 
 #MOUNT_IMAGE
 
@@ -109,29 +115,25 @@ fi
 
 cd /media/$USER/boot
 
-if [[ ! -e config.txt.org ]]; then
-	cp config.txt config.txt.org
+# WLAN
+if [[ -e $INSTALL_DIR/wpa_supplicant.conf ]]; then
+  cp $INSTALL_DIR/wpa_supplicant.conf .
 fi
+# enable ssh
+touch ssh
 
 cat<<EOF >> config.txt
 # for OTG mode
 dtoverlay=dwc2
 EOF
 
-if [[ ! -e cmdline.txt.org ]]; then
-	cp cmdline.txt cmdline.txt.org
-fi
-
 sed -i 's/rootwait /rootwait modules-load=dwc2,g_ether g_ether.dev_addr=AA:BB:CC:DD:EE:GG g_ether.host_addr=AA:BB:CC:DD:EE:FF /' cmdline.txt
+#sed -i 's/rootwait /rootwait modules-load=dwc2,g_ether /' cmdline.txt
 
-# enable ssh
-touch ssh
-
-cd /media/$USER/rootfs/etc/modprobe.d
-echo "options g_ether host_addr=AA:BB:CC:DD:EE:GG dev_addr=AA:BB:CC:DD:EE:FF" | sudo tee -a g_ether.conf
+#cd /media/$USER/rootfs/etc/modprobe.d
+#echo "options g_ether host_addr=AA:BB:CC:DD:EE:GG dev_addr=AA:BB:CC:DD:EE:FF" | sudo tee -a g_ether.conf
 
 cd /media/$USER
-
 sudo umount boot
 sudo umount rootfs
 
@@ -141,24 +143,21 @@ sudo rmdir rootfs
 #SETUP_INTERFACE
 
 printf "Insert SDCARD into your Raspberry Pi and connect with USB cable to your PC.\n"
+
 printf "Waiting for interface comming up.";
-while [[ `/sbin/ifconfig | grep "aa:bb:cc:dd:ee:ff" | wc -l` -eq 0 ]]; do
+while [[ $(ip --oneline link show | grep "aa:bb:cc:dd:ee:ff" | wc -l) -eq 0 ]]; do
   sleep 1
   printf "."
 done 
 printf "\n"
-IF_NAME=`/sbin/ifconfig | grep "aa:bb:cc:dd:ee:ff" | cut -d' ' -f1`
-printf "Hardware interface is named $IF_NAME, trying to rename it in connection manager as \"PI\".\n";
+IF_NAME=$(ip --oneline link show | grep aa:bb:cc:dd:ee:ff | awk '{split($0,a,": "); print a[2];}')
+printf "Using interface $IF_NAME.\n";
 
-while [[ `nmcli --terse --fields NAME,DEVICE con show | grep $IF_NAME | wc -l` -eq 0 ]]; do
-  sleep 1
-  printf "."
-done;
-printf "\n"
-CON_NAME=`nmcli --terse --fields NAME,DEVICE con show | grep $IF_NAME | cut -d: -f1`
-printf "Renaming \"$CON_NAME\" to \"PI\"\n";
-nmcli con modify "$CON_NAME" connection.id PI
-printf "Modifying connection PI to \"shared to other computers\"\n"; 
-nmcli con mod PI ipv4.method shared
-printf "Finished. Now wait 60s and try ssh pi@raspberrypi.local, password \"raspberry\" \n";
+if [[ $(nmcli connection | grep local_pi_shared | wc -l) -eq 0 ]]; then
+  printf "Creating sharing connection to $IF_NAME\n"; 
+  nmcli connection add type ethernet ifname $IF_NAME ipv4.method shared con-name local_pi_shared
+fi
 
+nmcli connection up local_pi_shared
+
+printf "Finished. Now wait try ssh pi@raspberrypi.local, password \"raspberry\" \n";
